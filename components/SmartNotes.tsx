@@ -173,15 +173,23 @@ export const SmartNotes: React.FC = () => {
         ) : (
             <>
                 <div className="p-4 border-b border-surfaceHighlight flex items-center gap-4 bg-surface/50">
+                    <button 
+                        onClick={handleSaveNote}
+                        className="p-2 px-4 rounded-lg bg-primary text-background font-medium hover:bg-primary/90 transition-colors flex items-center gap-2 shrink-0"
+                    >
+                        <Save size={18} />
+                        <span className="hidden sm:inline">Save</span>
+                    </button>
+
                     <input 
                         type="text" 
                         value={currentNote.title}
                         onChange={(e) => setCurrentNote(prev => ({ ...prev, title: e.target.value }))}
                         placeholder="Note Title..."
-                        className="bg-transparent text-xl font-medium text-text placeholder-textMuted/50 focus:outline-none flex-1"
+                        className="bg-transparent text-xl font-medium text-text placeholder-textMuted/50 focus:outline-none flex-1 min-w-0"
                     />
                     
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 shrink-0">
                         <input 
                             type="file" 
                             accept="image/*" 
@@ -196,14 +204,6 @@ export const SmartNotes: React.FC = () => {
                         >
                             {ocrStatus === LoadingState.LOADING ? <Loader2 size={18} className="animate-spin" /> : <ImageIcon size={18} />}
                             <span className="hidden sm:inline">Photo-to-Note</span>
-                        </button>
-
-                        <button 
-                            onClick={handleSaveNote}
-                            className="p-2 px-4 rounded-lg bg-primary text-background font-medium hover:bg-primary/90 transition-colors flex items-center gap-2"
-                        >
-                            <Save size={18} />
-                            <span className="hidden sm:inline">Save</span>
                         </button>
                     </div>
                 </div>

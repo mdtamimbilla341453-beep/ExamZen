@@ -1,212 +1,230 @@
-
-import { GoogleGenAI, Type } from "@google/genai";
+// Note: Filename kept as geminiService.ts to avoid breaking imports in other files.
+import { createWorker } from 'tesseract.js';
+import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import { QuizQuestion, ImageInput } from '../types';
 
-// Always use process.env.API_KEY for initialization
+// Per guidelines: The API key must be obtained exclusively from the environment variable process.env.API_KEY.
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-/**
- * Uses Gemini 3 Flash for fast multimodal OCR and text extraction.
- */
-export const extractTextFromImage = async (base64Image: string, mimeType: string): Promise<string> => {
-  try {
-    // FIX: Using contents: { parts: [...] } structure as per Google GenAI SDK standards
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              data: base64Image,
-              mimeType: mimeType,
-            },
-          },
-          { text: "Extract all text from this image as accurately as possible. Return only the extracted text." },
-        ],
-      },
-    });
-    return response.text?.trim() || "No readable text found.";
-  } catch (error) {
-    console.error("OCR Error:", error);
-    return "Error extracting text.";
-  }
-};
-
-/**
- * Generates a focused study plan using Gemini 3 Flash.
- */
-export const generateStudyPlan = async (subject: string, topic: string): Promise<string> => {
+// --- Helper: Exponential Backoff Retry ---
+const retryWithBackoff = async <T>(
+    operation: () => Promise<T>,
+    retries: number = 10, // Increased to 10 to handle strict free tier limits
+    delay: number = 5000 // Start with 5 seconds delay
+): Promise<T> => {
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: `Subject: ${subject}, Topic: ${topic}. Give 3 concise study tips in Bengali.`,
-        });
-        return response.text || "পড়ার পরিকল্পনা তৈরি করা যাচ্ছে না।";
-    } catch (error) {
-        return "পড়ার পরিকল্পনা তৈরি করা যাচ্ছে না।";
+        return await operation();
+    } catch (error: any) {
+        // Check for 429 (Resource Exhausted) or common rate limit indicators
+        const isQuotaError = 
+            error?.code === 429 || 
+            error?.status === 429 || 
+            (error?.message && error.message.includes('429')) ||
+            (error?.message && error.message.toLowerCase().includes('quota')) ||
+            (error?.message && error.message.toLowerCase().includes('resource_exhausted'));
+            
+        if (retries > 0 && isQuotaError) {
+            console.warn(`Quota exceeded (429). Retrying in ${delay/1000}s... (${retries} attempts left)`);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            // Exponential backoff with a cap of 60 seconds
+            const nextDelay = Math.min(delay * 2, 60000); 
+            return retryWithBackoff(operation, retries - 1, nextDelay);
+        }
+        throw error;
     }
 };
 
-/**
- * Analyzes multiple chapter pages using a 'Strict Exam Examiner' persona.
- * Optimized for processing 10+ pages simultaneously.
- */
+// --- Tesseract OCR Helper (Kept for Smart Notes single-page text extraction) ---
+const performOCR = async (base64Image: string, mimeType: string): Promise<string> => {
+    // Tesseract expects a standard image source (url, base64 with prefix, etc.)
+    const imageUrl = `data:${mimeType};base64,${base64Image}`;
+    
+    // Initialize worker with English language
+    const worker = await createWorker('eng');
+    
+    try {
+        const ret = await worker.recognize(imageUrl);
+        await worker.terminate();
+        return ret.data.text;
+    } catch (error) {
+        await worker.terminate();
+        throw error;
+    }
+};
+
+export const extractTextFromImage = async (base64Image: string, mimeType: string): Promise<string> => {
+  try {
+    console.log("Starting Tesseract OCR...");
+    const text = await performOCR(base64Image, mimeType);
+    
+    if (!text || text.trim().length === 0) {
+        return "No readable text found in the image.";
+    }
+    return text;
+  } catch (error) {
+    console.error("OCR Error:", error);
+    // Fallback message if OCR completely fails
+    return "Error extracting text. Please ensure the image is clear.";
+  }
+};
+
+export const generateStudyPlan = async (subject: string, topic: string): Promise<string> => {
+    try {
+        const response = await retryWithBackoff(() => ai.models.generateContent({
+            model: 'gemini-3-flash-preview',
+            contents: `You are a helpful student assistant. Create a concise, 3-bullet point study strategy for the topic "${topic}" in the subject "${subject}". Keep it motivating and actionable for a student.`
+        })) as GenerateContentResponse;
+        
+        return response.text || "Focus on key concepts and practice problems.";
+    } catch (error) {
+        console.error("Study Plan Error:", error);
+        // Fallback to avoid breaking the UI when quota is hit
+        return `1. Review ${topic} definitions.\n2. Practice 5 past problems.\n3. Summarize your notes. (AI offline due to high traffic)`;
+    }
+}
+
+// Re-export ImageInput for convenience if needed, though it's defined in types
+export { type ImageInput };
+
+const prepareImageParts = (images: ImageInput[]) => {
+    return images.map(img => ({
+         inlineData: {
+             data: img.base64,
+             mimeType: img.mimeType
+         }
+     }));
+};
+
 export const analyzeChapter = async (images: ImageInput[]) => {
   try {
-     // Personified prompt for comprehensive multi-page analysis
-     const prompt = `Act as a strict Exam Examiner. Read these sequential pages of a chapter. 
-     Provide a comprehensive summary of the topics covered in Bengali. 
-     Then, list the Top 10 Most Likely Exam Questions based on this content in Bengali.
-     Return the result in ONLY JSON format following the schema provided. 
-     Analyze ALL provided images carefully to ensure context is maintained across pages.`;
+     console.log(`Analyzing ${images.length} images with Gemini Vision...`);
 
-     // FIX: Constructing parts as a single array literal to avoid TypeScript inference issues with .push()
-     const parts = [
-       ...images.map(img => ({
-         inlineData: {
-           data: img.base64,
-           mimeType: img.mimeType
-         }
-       })),
-       { text: prompt }
-     ];
+     const imageParts = prepareImageParts(images);
 
-     const response = await ai.models.generateContent({
-       model: 'gemini-3-flash-preview',
-       contents: { parts },
-       config: {
-         responseMimeType: "application/json",
-         responseSchema: {
-           type: Type.OBJECT,
-           properties: {
-             summary: { 
-                type: Type.STRING, 
-                description: "A detailed comprehensive summary in Bengali." 
-             },
-             questions: { 
-                type: Type.ARRAY, 
-                items: { type: Type.STRING }, 
-                description: "List of exactly 10 exam questions in Bengali." 
-             },
-             topics: { 
-                type: Type.ARRAY, 
-                items: { type: Type.STRING }, 
-                description: "5-7 key topic tags in Bengali." 
-             }
-           },
-           required: ["summary", "questions", "topics"]
-         }
-       }
-     });
+     const prompt = `
+     Act as an expert teacher. Analyze these textbook pages.
      
-     const jsonStr = response.text || '{}';
-     return JSON.parse(jsonStr);
+     Task:
+     1. Provide a detailed Summary (সারসংক্ষেপ) of the content.
+     2. List 10 Important Questions (গুরুত্বপূর্ণ প্রশ্ন) based on the content.
+     3. Identify key topics/keywords.
+     
+     CRITICAL: The entire output content (summary, questions, topics) must be in BENGALI language only. Do not use English for the content.
+     
+     Return the result strictly as a valid JSON object with this exact structure (keep keys in English):
+     {
+       "summary": "Bengali summary text...",
+       "questions": ["Bengali question 1", "Bengali question 2", ...],
+       "topics": ["Bengali topic 1", "Bengali topic 2", ...]
+     }
+     `;
+
+     const response = await retryWithBackoff(() => ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: {
+            parts: [...imageParts, { text: prompt }]
+        },
+        config: {
+            responseMimeType: 'application/json'
+        }
+     })) as GenerateContentResponse;
+     
+     let text = response.text || "";
+     // Clean up markdown if present to ensure JSON.parse works
+     text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+
+     if (text) {
+         return JSON.parse(text);
+     }
+     throw new Error("Empty response from AI");
   } catch (error) {
       console.error("Analysis Error:", error);
       throw error;
   }
 };
 
-/**
- * Translates academic text while preserving tone.
- */
 export const translateText = async (text: string, targetLanguage: string): Promise<string> => {
     try {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: `Translate to ${targetLanguage} while maintaining an academic tone: ${text}`,
-        });
-        return response.text || "Error translating.";
+        const response = await retryWithBackoff(() => ai.models.generateContent({
+            model: 'gemini-3-flash-preview',
+            contents: `Translate the following academic text into ${targetLanguage}. Maintain the formal tone and terminology suitable for a student.\n\nText to translate:\n${text}`
+        })) as GenerateContentResponse;
+        return response.text || "Translation failed.";
     } catch (error) {
-        return "Error translating.";
+        console.error("Translation Error:", error);
+        return "Error translating text. Please try again later (Quota Exceeded).";
     }
 };
 
-/**
- * Generates an interactive quiz based on chapter content.
- */
 export const generateQuiz = async (images: ImageInput[]): Promise<QuizQuestion[]> => {
     try {
-        const prompt = `Generate 10 challenging MCQs based on the provided study material in Bengali. Each question must have exactly 4 options, a correct answer index, and a detailed explanation.`;
+        const imageParts = prepareImageParts(images);
+        const prompt = `
+        Read the provided text deeply. Generate a comprehensive and exhaustive list of MCQs (Target: 15 to 20 questions or more). 
+        Cover every small detail, definition, and concept from the text. 
         
-        // FIX: Constructing parts as a single array literal to avoid TypeScript inference issues with .push()
-        const parts = [
-          ...images.map(img => ({
-            inlineData: {
-              data: img.base64,
-              mimeType: img.mimeType
-            }
-          })),
-          { text: prompt }
-        ];
+        CRITICAL: Generate all questions, options, and explanations in BENGALI (Bangla) language.
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-pro-preview',
-          contents: { parts },
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                questions: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      question: { type: Type.STRING },
-                      options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                      correctAnswer: { type: Type.INTEGER, description: "0-based index of correct option" },
-                      explanation: { type: Type.STRING }
-                    },
-                    required: ["question", "options", "correctAnswer", "explanation"]
-                  }
-                }
-              },
-              required: ["questions"]
+        Format the output strictly as a JSON array of objects with this structure:
+        [
+            {
+                "question": "The question text in Bengali?",
+                "options": ["Option A", "Option B", "Option C", "Option D"],
+                "correctAnswer": 0, // 0 for A, 1 for B, etc.
+                "explanation": "Brief explanation of why this is correct in Bengali."
             }
-          }
-        });
-        const parsed = JSON.parse(response.text || '{"questions":[]}');
-        return parsed.questions;
+        ]
+        `;
+
+        const response = await retryWithBackoff(() => ai.models.generateContent({
+            model: 'gemini-3-flash-preview',
+            contents: {
+                parts: [...imageParts, { text: prompt }]
+            },
+            config: {
+                responseMimeType: 'application/json'
+            }
+        })) as GenerateContentResponse;
+
+        let text = response.text || "";
+        // Clean up markdown if present to ensure JSON.parse works
+        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+
+        if (text) {
+            return JSON.parse(text);
+        }
+        throw new Error("Empty response");
     } catch (error) {
-        console.error("Quiz Generation Error:", error);
+        console.error("Quiz Gen Error", error);
         throw error;
     }
 };
 
-/**
- * Real-time tutor interaction based on uploaded materials.
- */
 export const askTutor = async (images: ImageInput[], history: {role: string, text: string}[], question: string): Promise<string> => {
     try {
-        const imageParts = images.map(img => ({
-          inlineData: {
-            data: img.base64,
-            mimeType: img.mimeType
-          }
-        }));
+        const imageParts = prepareImageParts(images);
         
-        const historyParts = history.map(msg => ({
-          text: `${msg.role === 'model' ? 'Tutor' : 'Student'}: ${msg.text}`
-        }));
+        // Construct conversation history logic if needed, but for 'Chat with Book', 
+        // we often just need the context + current question.
+        // We will send images + question.
         
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: { 
-            parts: [
-              ...imageParts,
-              ...historyParts,
-              { text: `Answer briefly in Bengali based on the provided material: ${question}` }
-            ] 
-          },
-          config: {
-            systemInstruction: "You are an expert academic tutor. Use the provided book images to answer student questions in Bengali accurately and concisely."
-          }
-        });
+        const prompt = `
+        You are a helpful and friendly tutor. The user is asking a question about the provided textbook pages.
+        Answer simply and clearly. If the user asks for an explanation, use analogies suitable for a student.
         
-        return response.text || "Tutor is currently busy.";
+        User Question: "${question}"
+        `;
+
+        const response = await retryWithBackoff(() => ai.models.generateContent({
+            model: 'gemini-3-flash-preview',
+            contents: {
+                parts: [...imageParts, { text: prompt }]
+            }
+        })) as GenerateContentResponse;
+
+        return response.text || "I couldn't understand that context.";
     } catch (error) {
-        console.error("Tutor Error:", error);
-        return "Tutor is currently busy.";
+        console.error("Tutor Error", error);
+        return "Sorry, I'm taking a break right now (High Traffic). Please ask again in a minute.";
     }
 };

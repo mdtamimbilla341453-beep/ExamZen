@@ -1,17 +1,17 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
-import process from 'node:process';
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
+  // Load env file based on `mode` in the current working directory.
+  const env = loadEnv(mode, (process as any).cwd(), '');
   
-  // Using the requested key: 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
-  const activeKey = "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";
-
   return {
     plugins: [react()],
     define: {
-      'process.env.API_KEY': JSON.stringify(activeKey || env.VITE_API_KEY || env.API_KEY),
+      // Safely inject the API key. Vercel env vars often don't have VITE_ prefix unless specified.
+      // This checks both VITE_API_KEY and API_KEY.
+      'process.env.API_KEY': JSON.stringify(env.VITE_API_KEY || env.API_KEY),
+      // Polyfill process.env to prevent crashes in libraries that expect node environment
       'process.env': {} 
     },
     build: {

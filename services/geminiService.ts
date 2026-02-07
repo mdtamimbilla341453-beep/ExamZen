@@ -2,13 +2,17 @@ import { createWorker } from 'tesseract.js';
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import { QuizQuestion, ImageInput } from '../types';
 
-// Use gemini-3-flash-preview as requested
+// Use gemini-3-flash-preview as the core model
 const MODEL_NAME = 'gemini-3-flash-preview';
 
-// Helper to get a fresh AI instance with the current API Key
+/**
+ * Robust AI instance generator. 
+ * process.env.API_KEY is replaced during build time by Vite.
+ */
 const getAI = () => {
   const apiKey = process.env.API_KEY;
-  if (!apiKey) {
+  if (!apiKey || apiKey.trim() === '') {
+    console.error("Critical: API Key is missing. Ensure VITE_API_KEY is set in your environment.");
     throw new Error("API Key is missing. Please check your configuration.");
   }
   return new GoogleGenAI({ apiKey });
@@ -47,7 +51,7 @@ const resizeImage = async (base64: string, mimeType: string, maxWidth = 800): Pr
     });
 };
 
-// --- Helper: Retry Logic with Bengali Error Messages ---
+// --- Helper: Retry Logic ---
 const retryWithBackoff = async <T>(
     operation: () => Promise<T>,
     retries: number = 2,
@@ -67,7 +71,7 @@ const retryWithBackoff = async <T>(
         if (errorMessage.includes('429') || errorMessage.includes('quota')) {
             throw new Error("এপিআই লিমিট শেষ হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।");
         }
-        if (errorMessage.includes('api_key_invalid') || errorMessage.includes('invalid api key')) {
+        if (errorMessage.includes('key') && (errorMessage.includes('invalid') || errorMessage.includes('403'))) {
             throw new Error("আপনার এপিআই কী (API Key) সঠিক নয়।");
         }
         

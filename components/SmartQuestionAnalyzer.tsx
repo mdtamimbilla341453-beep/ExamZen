@@ -1,4 +1,4 @@
-import React, { useRef, useState, Dispatch, SetStateAction } from 'react';
+import React, { useRef, useState, Dispatch, SetStateAction, useEffect } from 'react';
 import { analyzeChapter } from '../services/geminiService';
 import { LoadingState, AnalysisResult, ImageInput } from '../types';
 import { X, FileText, Tag, BrainCircuit, Loader2, ScanLine, AlertCircle, Layers, BookOpen } from 'lucide-react';
@@ -13,16 +13,36 @@ interface SmartQuestionAnalyzerProps {
 export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ images, setImages, result, setResult }) => {
   const [previews, setPreviews] = useState<string[]>(images.map(img => `data:${img.mimeType};base64,${img.base64}`));
   const [status, setStatus] = useState<LoadingState>(LoadingState.IDLE);
+  const [loadingStep, setLoadingStep] = useState<string>('স্ক্যানিং শুরু হচ্ছে...');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const steps = [
+    'ছবি প্রসেস করা হচ্ছে...',
+    'AI-এর কাছে পাঠানো হচ্ছে...',
+    'তথ্য বিশ্লেষণ করা হচ্ছে...',
+    'সারাংশ তৈরি করা হচ্ছে...',
+    'প্রশ্নাবলী সাজানো হচ্ছে...'
+  ];
+
+  useEffect(() => {
+    let interval: any;
+    if (status === LoadingState.LOADING) {
+      let stepIdx = 0;
+      interval = setInterval(() => {
+        stepIdx = (stepIdx + 1) % steps.length;
+        setLoadingStep(steps[stepIdx]);
+      }, 2500);
+    }
+    return () => clearInterval(interval);
+  }, [status]);
 
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
 
-    // Reset previous results if uploading new batch
     setResult(null);
     setStatus(LoadingState.IDLE);
-    setImages([]); // Clear old images from state
+    setImages([]); 
     setPreviews([]);
 
     Array.from(files).forEach((file: File) => {
@@ -32,12 +52,7 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
           const base64Data = base64String.split(',')[1];
           
           setPreviews(prev => [...prev, base64String]);
-          setImages(prev => {
-              const newImages = [...prev, { base64: base64Data, mimeType: file.type }];
-              // Hacky way to update parent state inside loop, but React batches updates usually. 
-              // Better to collect and set once, but for simplicity in this flow:
-              return newImages; 
-          });
+          setImages(prev => [...prev, { base64: base64Data, mimeType: file.type }]);
         };
         reader.readAsDataURL(file);
     });
@@ -45,9 +60,7 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
 
   const handleAnalyze = async () => {
     if (images.length === 0) return;
-    
     setStatus(LoadingState.LOADING);
-
     try {
       const data = await analyzeChapter(images);
       setResult(data);
@@ -68,10 +81,8 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
 
   const removeImage = (index: number, e: React.MouseEvent) => {
       e.stopPropagation();
-      const newPreviews = previews.filter((_, i) => i !== index);
-      const newImages = images.filter((_, i) => i !== index);
-      setPreviews(newPreviews);
-      setImages(newImages);
+      setPreviews(prev => prev.filter((_, i) => i !== index));
+      setImages(prev => prev.filter((_, i) => i !== index));
   };
 
   return (
@@ -79,7 +90,7 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
       <div className="flex justify-between items-start">
         <div>
           <h2 className="text-3xl font-light text-text">Chapter Scanner</h2>
-          <p className="text-textMuted text-sm mt-1">Upload pages to unlock Quiz and Tutor features.</p>
+          <p className="text-textMuted text-sm mt-1">দ্রুত অ্যানালাইসিস এর জন্য ছবি আপলোড করুন।</p>
         </div>
         {images.length > 0 && (
              <button 
@@ -149,9 +160,6 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
                                         <X size={14} />
                                     </button>
                                 </div>
-                                <span className="absolute bottom-1 right-1 text-[10px] bg-black/60 text-white px-1.5 rounded">
-                                    {idx + 1}
-                                </span>
                             </div>
                         ))}
                     </div>
@@ -166,7 +174,7 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
                 >
                     {status === LoadingState.LOADING ? (
                         <>
-                            <Loader2 size={20} className="animate-spin" /> Analyzing Chapter...
+                            <Loader2 size={20} className="animate-spin" /> {loadingStep}
                         </>
                     ) : (
                         <>
@@ -179,7 +187,7 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
             {status === LoadingState.ERROR && (
                 <div className="bg-red-500/10 border border-red-500/20 text-red-200 p-4 rounded-xl flex items-center gap-3">
                     <AlertCircle size={20} />
-                    <p>Analysis failed. Please try again.</p>
+                    <p>Analysis failed. Please try again (Check API Key/Quota).</p>
                 </div>
             )}
         </div>
@@ -189,12 +197,10 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
             {!result ? (
                 <div className="h-full flex flex-col items-center justify-center text-textMuted opacity-50 space-y-4">
                     <ScanLine size={48} strokeWidth={1} />
-                    <p className="text-sm font-light">Upload pages and analyze to see insights</p>
+                    <p className="text-sm font-light">বিশ্লেষণ করলে এখানে ফলাফল দেখা যাবে</p>
                 </div>
             ) : (
                 <div className="space-y-8 animate-fade-in-up">
-                    
-                    {/* Summary Section */}
                     <div className="bg-background/30 p-5 rounded-xl border border-white/5">
                         <div className="flex items-center gap-2 mb-3 text-primary">
                             <BookOpen size={18} />
@@ -205,51 +211,35 @@ export const SmartQuestionAnalyzer: React.FC<SmartQuestionAnalyzerProps> = ({ im
                         </p>
                     </div>
 
-                    {/* Key Topics */}
                     <div>
                         <div className="flex items-center gap-2 mb-4 text-secondary">
                             <Tag size={18} />
-                            <h3 className="font-medium tracking-wide uppercase text-xs">প্রধান আলোচ্য বিষয়</h3>
+                            <h3 className="font-medium tracking-wide uppercase text-xs">মূল ট্যাগ</h3>
                         </div>
                         <div className="flex flex-wrap gap-2">
-                            {result.topics && result.topics.length > 0 ? (
-                                result.topics.map((topic, i) => (
-                                    <span key={i} className="px-3 py-1 bg-secondary/10 text-secondary border border-secondary/20 rounded-full text-sm font-light">
-                                        #{topic}
-                                    </span>
-                                ))
-                            ) : (
-                                <p className="text-textMuted text-sm italic">No specific topics detected.</p>
-                            )}
+                            {result.topics?.map((topic, i) => (
+                                <span key={i} className="px-3 py-1 bg-secondary/10 text-secondary border border-secondary/20 rounded-full text-sm font-light">
+                                    #{topic}
+                                </span>
+                            ))}
                         </div>
                     </div>
 
                     <div className="w-full h-px bg-white/5"></div>
 
-                    {/* Questions */}
                     <div>
                         <div className="flex items-center gap-2 mb-4 text-accent">
                             <FileText size={18} />
-                            <h3 className="font-medium tracking-wide uppercase text-xs">গুরুত্বপূর্ণ প্রশ্নাবলী</h3>
+                            <h3 className="font-medium tracking-wide uppercase text-xs">গুরুত্বপূর্ণ প্রশ্ন</h3>
                         </div>
                         <div className="space-y-3">
-                            {result.questions && result.questions.length > 0 ? (
-                                result.questions.map((q, i) => (
-                                    <div key={i} className="p-4 bg-background/50 border border-surfaceHighlight rounded-xl hover:border-accent/30 transition-colors group">
-                                        <div className="flex gap-3">
-                                            <span className="text-accent/50 font-mono text-sm">{(i + 1).toString().padStart(2, '0')}</span>
-                                            <p className="text-text font-light leading-relaxed group-hover:text-white transition-colors">
-                                                {q}
-                                            </p>
-                                        </div>
-                                    </div>
-                                ))
-                            ) : (
-                                <p className="text-textMuted text-sm italic">No questions generated.</p>
-                            )}
+                            {result.questions?.map((q, i) => (
+                                <div key={i} className="p-4 bg-background/50 border border-surfaceHighlight rounded-xl group">
+                                    <p className="text-text font-light leading-relaxed">{q}</p>
+                                </div>
+                            ))}
                         </div>
                     </div>
-
                 </div>
             )}
         </div>

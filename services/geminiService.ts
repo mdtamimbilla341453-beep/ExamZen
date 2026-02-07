@@ -2,15 +2,16 @@ import { createWorker } from 'tesseract.js';
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import { QuizQuestion, ImageInput } from '../types';
 
-// Use gemini-3-flash-preview as the default "free" and fast model
+// Use gemini-3-flash-preview as requested
 const MODEL_NAME = 'gemini-3-flash-preview';
 
 // Helper to get a fresh AI instance with the current API Key
 const getAI = () => {
-  if (!process.env.API_KEY) {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
     throw new Error("API Key is missing. Please check your configuration.");
   }
-  return new GoogleGenAI({ apiKey: process.env.API_KEY });
+  return new GoogleGenAI({ apiKey });
 };
 
 // --- Helper: Image Resizer ---
@@ -39,7 +40,6 @@ const resizeImage = async (base64: string, mimeType: string, maxWidth = 800): Pr
             canvas.height = height;
             const ctx = canvas.getContext('2d');
             ctx?.drawImage(img, 0, 0, width, height);
-            // Lower quality slightly to reduce payload size for free tier limits
             const dataUrl = canvas.toDataURL(mimeType, 0.6); 
             resolve(dataUrl.split(',')[1]);
         };
@@ -59,9 +59,7 @@ const retryWithBackoff = async <T>(
         console.error("Gemini API Error:", error);
         const errorMessage = error?.message?.toLowerCase() || "";
         
-        // Handle common API failures gracefully
         if (retries > 0 && (errorMessage.includes('429') || errorMessage.includes('500') || errorMessage.includes('overloaded') || errorMessage.includes('quota'))) {
-            console.warn(`API is busy. Retrying... (${retries} left)`);
             await new Promise((resolve) => setTimeout(resolve, delay));
             return retryWithBackoff(operation, retries - 1, delay * 2);
         }

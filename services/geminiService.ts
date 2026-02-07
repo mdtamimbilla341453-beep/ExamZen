@@ -1,70 +1,80 @@
-// Note: Filename kept as geminiService.ts to avoid breaking imports in other files.
+
 import { createWorker } from 'tesseract.js';
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import { QuizQuestion, ImageInput } from '../types';
 
-// Per guidelines: The API key must be obtained exclusively from the environment variable process.env.API_KEY.
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-// --- Helper: Exponential Backoff Retry ---
+// --- Helper: Image Resizer (To prevent 413 Payload Too Large or Timeouts) ---
+const resizeImage = async (base64: string, mimeType: string, maxWidth = 1024): Promise<string> => {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.src = `data:${mimeType};base64,${base64}`;
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            let width = img.width;
+            let height = img.height;
+
+            if (width > height) {
+                if (width > maxWidth) {
+                    height *= maxWidth / width;
+                    width = maxWidth;
+                }
+            } else {
+                if (height > maxWidth) {
+                    width *= maxWidth / height;
+                    height = maxWidth;
+                }
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx?.drawImage(img, 0, 0, width, height);
+            const dataUrl = canvas.toDataURL(mimeType, 0.8); // 80% quality
+            resolve(dataUrl.split(',')[1]);
+        };
+    });
+};
+
+// --- Helper: Improved Retry Logic with specific error detection ---
 const retryWithBackoff = async <T>(
     operation: () => Promise<T>,
-    retries: number = 10, // Increased to 10 to handle strict free tier limits
-    delay: number = 5000 // Start with 5 seconds delay
+    retries: number = 5,
+    delay: number = 3000 
 ): Promise<T> => {
     try {
         return await operation();
     } catch (error: any) {
-        // Check for 429 (Resource Exhausted) or common rate limit indicators
-        const isQuotaError = 
-            error?.code === 429 || 
-            error?.status === 429 || 
-            (error?.message && error.message.includes('429')) ||
-            (error?.message && error.message.toLowerCase().includes('quota')) ||
-            (error?.message && error.message.toLowerCase().includes('resource_exhausted'));
-            
-        if (retries > 0 && isQuotaError) {
-            console.warn(`Quota exceeded (429). Retrying in ${delay/1000}s... (${retries} attempts left)`);
-            await new Promise((resolve) => setTimeout(resolve, delay));
-            // Exponential backoff with a cap of 60 seconds
-            const nextDelay = Math.min(delay * 2, 60000); 
+        const errorMessage = error?.message?.toLowerCase() || "";
+        const isRateLimit = errorMessage.includes('429') || errorMessage.includes('quota');
+        const isServerBusy = errorMessage.includes('500') || errorMessage.includes('503') || errorMessage.includes('overloaded');
+
+        if (retries > 0 && (isRateLimit || isServerBusy)) {
+            const nextDelay = isRateLimit ? delay * 2 : delay; // Wait longer for rate limits
+            console.warn(`API Busy/Limit reached. Retrying in ${nextDelay/1000}s...`);
+            await new Promise((resolve) => setTimeout(resolve, nextDelay));
             return retryWithBackoff(operation, retries - 1, nextDelay);
         }
-        throw error;
-    }
-};
-
-// --- Tesseract OCR Helper (Kept for Smart Notes single-page text extraction) ---
-const performOCR = async (base64Image: string, mimeType: string): Promise<string> => {
-    // Tesseract expects a standard image source (url, base64 with prefix, etc.)
-    const imageUrl = `data:${mimeType};base64,${base64Image}`;
-    
-    // Initialize worker with English language
-    const worker = await createWorker('eng');
-    
-    try {
-        const ret = await worker.recognize(imageUrl);
-        await worker.terminate();
-        return ret.data.text;
-    } catch (error) {
-        await worker.terminate();
+        
+        // If it's a specific quota error, throw a friendly message
+        if (isRateLimit) {
+            throw new Error("API Quota Exceeded. Please wait a minute before trying again.");
+        }
         throw error;
     }
 };
 
 export const extractTextFromImage = async (base64Image: string, mimeType: string): Promise<string> => {
   try {
-    console.log("Starting Tesseract OCR...");
-    const text = await performOCR(base64Image, mimeType);
-    
-    if (!text || text.trim().length === 0) {
-        return "No readable text found in the image.";
-    }
-    return text;
+    const worker = await createWorker('eng');
+    const imageUrl = `data:${mimeType};base64,${base64Image}`;
+    const ret = await worker.recognize(imageUrl);
+    await worker.terminate();
+    return ret.data.text || "No text found.";
   } catch (error) {
     console.error("OCR Error:", error);
-    // Fallback message if OCR completely fails
-    return "Error extracting text. Please ensure the image is clear.";
+    return "Error extracting text.";
   }
 };
 
@@ -72,159 +82,63 @@ export const generateStudyPlan = async (subject: string, topic: string): Promise
     try {
         const response = await retryWithBackoff(() => ai.models.generateContent({
             model: 'gemini-3-flash-preview',
-            contents: `You are a helpful student assistant. Create a concise, 3-bullet point study strategy for the topic "${topic}" in the subject "${subject}". Keep it motivating and actionable for a student.`
+            contents: `Create a concise, 3-bullet point study strategy for: Subject: ${subject}, Topic: ${topic}. Bengali language.`
         })) as GenerateContentResponse;
-        
-        return response.text || "Focus on key concepts and practice problems.";
+        return response.text || "No plan generated.";
     } catch (error) {
-        console.error("Study Plan Error:", error);
-        // Fallback to avoid breaking the UI when quota is hit
-        return `1. Review ${topic} definitions.\n2. Practice 5 past problems.\n3. Summarize your notes. (AI offline due to high traffic)`;
+        return "1. Review concepts.\n2. Solve problems.\n3. Take rest.";
     }
 }
 
-// Re-export ImageInput for convenience if needed, though it's defined in types
-export { type ImageInput };
-
-const prepareImageParts = (images: ImageInput[]) => {
-    return images.map(img => ({
-         inlineData: {
-             data: img.base64,
-             mimeType: img.mimeType
-         }
-     }));
+const prepareImages = async (images: ImageInput[]) => {
+    const processed = await Promise.all(images.map(async img => ({
+        inlineData: {
+            data: await resizeImage(img.base64, img.mimeType),
+            mimeType: img.mimeType
+        }
+    })));
+    return processed;
 };
 
 export const analyzeChapter = async (images: ImageInput[]) => {
-  try {
-     console.log(`Analyzing ${images.length} images with Gemini Vision...`);
+  const imageParts = await prepareImages(images);
+  const prompt = `Act as an expert teacher. Analyze these textbook pages. Provide: 1. Summary, 2. 10 Questions, 3. Key Topics. Language: BENGALI. Return JSON format with keys: summary, questions, topics.`;
 
-     const imageParts = prepareImageParts(images);
-
-     const prompt = `
-     Act as an expert teacher. Analyze these textbook pages.
-     
-     Task:
-     1. Provide a detailed Summary (সারসংক্ষেপ) of the content.
-     2. List 10 Important Questions (গুরুত্বপূর্ণ প্রশ্ন) based on the content.
-     3. Identify key topics/keywords.
-     
-     CRITICAL: The entire output content (summary, questions, topics) must be in BENGALI language only. Do not use English for the content.
-     
-     Return the result strictly as a valid JSON object with this exact structure (keep keys in English):
-     {
-       "summary": "Bengali summary text...",
-       "questions": ["Bengali question 1", "Bengali question 2", ...],
-       "topics": ["Bengali topic 1", "Bengali topic 2", ...]
-     }
-     `;
-
-     const response = await retryWithBackoff(() => ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: {
-            parts: [...imageParts, { text: prompt }]
-        },
-        config: {
-            responseMimeType: 'application/json'
-        }
-     })) as GenerateContentResponse;
-     
-     let text = response.text || "";
-     // Clean up markdown if present to ensure JSON.parse works
-     text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-
-     if (text) {
-         return JSON.parse(text);
-     }
-     throw new Error("Empty response from AI");
-  } catch (error) {
-      console.error("Analysis Error:", error);
-      throw error;
-  }
+  const response = await retryWithBackoff(() => ai.models.generateContent({
+    model: 'gemini-3-flash-preview',
+    contents: { parts: [...imageParts, { text: prompt }] },
+    config: { responseMimeType: 'application/json' }
+  })) as GenerateContentResponse;
+  
+  return JSON.parse(response.text.replace(/```json/g, '').replace(/```/g, '').trim());
 };
 
 export const translateText = async (text: string, targetLanguage: string): Promise<string> => {
-    try {
-        const response = await retryWithBackoff(() => ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: `Translate the following academic text into ${targetLanguage}. Maintain the formal tone and terminology suitable for a student.\n\nText to translate:\n${text}`
-        })) as GenerateContentResponse;
-        return response.text || "Translation failed.";
-    } catch (error) {
-        console.error("Translation Error:", error);
-        return "Error translating text. Please try again later (Quota Exceeded).";
-    }
+    const response = await retryWithBackoff(() => ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: `Translate to ${targetLanguage}: ${text}`
+    })) as GenerateContentResponse;
+    return response.text || "Failed to translate.";
 };
 
 export const generateQuiz = async (images: ImageInput[]): Promise<QuizQuestion[]> => {
-    try {
-        const imageParts = prepareImageParts(images);
-        const prompt = `
-        Read the provided text deeply. Generate a comprehensive and exhaustive list of MCQs (Target: 15 to 20 questions or more). 
-        Cover every small detail, definition, and concept from the text. 
-        
-        CRITICAL: Generate all questions, options, and explanations in BENGALI (Bangla) language.
+    const imageParts = await prepareImages(images);
+    const prompt = `Generate 15-20 MCQs in BENGALI from these pages. Return JSON array of objects with keys: question, options (array of 4), correctAnswer (index), explanation.`;
 
-        Format the output strictly as a JSON array of objects with this structure:
-        [
-            {
-                "question": "The question text in Bengali?",
-                "options": ["Option A", "Option B", "Option C", "Option D"],
-                "correctAnswer": 0, // 0 for A, 1 for B, etc.
-                "explanation": "Brief explanation of why this is correct in Bengali."
-            }
-        ]
-        `;
+    const response = await retryWithBackoff(() => ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: { parts: [...imageParts, { text: prompt }] },
+        config: { responseMimeType: 'application/json' }
+    })) as GenerateContentResponse;
 
-        const response = await retryWithBackoff(() => ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: {
-                parts: [...imageParts, { text: prompt }]
-            },
-            config: {
-                responseMimeType: 'application/json'
-            }
-        })) as GenerateContentResponse;
-
-        let text = response.text || "";
-        // Clean up markdown if present to ensure JSON.parse works
-        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-
-        if (text) {
-            return JSON.parse(text);
-        }
-        throw new Error("Empty response");
-    } catch (error) {
-        console.error("Quiz Gen Error", error);
-        throw error;
-    }
+    return JSON.parse(response.text.replace(/```json/g, '').replace(/```/g, '').trim());
 };
 
-export const askTutor = async (images: ImageInput[], history: {role: string, text: string}[], question: string): Promise<string> => {
-    try {
-        const imageParts = prepareImageParts(images);
-        
-        // Construct conversation history logic if needed, but for 'Chat with Book', 
-        // we often just need the context + current question.
-        // We will send images + question.
-        
-        const prompt = `
-        You are a helpful and friendly tutor. The user is asking a question about the provided textbook pages.
-        Answer simply and clearly. If the user asks for an explanation, use analogies suitable for a student.
-        
-        User Question: "${question}"
-        `;
-
-        const response = await retryWithBackoff(() => ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
-            contents: {
-                parts: [...imageParts, { text: prompt }]
-            }
-        })) as GenerateContentResponse;
-
-        return response.text || "I couldn't understand that context.";
-    } catch (error) {
-        console.error("Tutor Error", error);
-        return "Sorry, I'm taking a break right now (High Traffic). Please ask again in a minute.";
-    }
+export const askTutor = async (images: ImageInput[], history: any[], question: string): Promise<string> => {
+    const imageParts = await prepareImages(images);
+    const response = await retryWithBackoff(() => ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: { parts: [...imageParts, { text: `Tutor session. Question: ${question}` }] }
+    })) as GenerateContentResponse;
+    return response.text || "I'm not sure about that.";
 };

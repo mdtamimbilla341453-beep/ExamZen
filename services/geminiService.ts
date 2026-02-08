@@ -3,23 +3,19 @@ import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import { QuizQuestion, ImageInput } from '../types';
 
 /**
- * নির্দেশিকা অনুযায়ী 'gemini-3-flash-preview' ব্যবহার করা হচ্ছে।
- * এটি 1.5 Flash এর চেয়ে উন্নত এবং দ্রুত।
+ * Gemini 1.5 Flash মডেল (gemini-flash-latest)
  */
-const MODEL_NAME = 'gemini-3-flash-preview';
+const MODEL_NAME = 'gemini-flash-latest';
 
 /**
- * এপিআই কী রিড করার মজবুত পদ্ধতি।
+ * এপিআই কী রিড করার জন্য হেল্পার
  */
-const getAI = () => {
-  // @ts-ignore
-  const apiKey = (process.env.API_KEY || import.meta.env.VITE_API_KEY || '').trim();
-  
-  if (!apiKey) {
-    console.error("Critical: API Key is missing.");
-    throw new Error("এপিআই কী পাওয়া যাচ্ছে না। অনুগ্রহ করে এনভায়রনমেন্ট সেটিংস চেক করুন।");
+const getApiKey = () => {
+  const key = process.env.API_KEY || '';
+  if (!key.trim()) {
+    throw new Error("এপিআই কী পাওয়া যায়নি। অনুগ্রহ করে Netlify/Vercel এ VITE_API_KEY বা API_KEY এনভায়রনমেন্ট ভেরিয়েবল চেক করুন।");
   }
-  return new GoogleGenAI({ apiKey });
+  return key.trim();
 };
 
 // --- Helper: Image Resizer for efficiency ---
@@ -73,10 +69,10 @@ const retryWithBackoff = async <T>(
         }
         
         if (status === 403 || msg.includes('key') || msg.includes('invalid')) {
-            throw new Error("আপনার এপিআই কী (API Key) সঠিক নয় অথবা কাজ করছে না।");
+            throw new Error("আপনার এপিআই কী সঠিক নয়। অনুগ্রহ করে আপনার API Key চেক করুন।");
         }
         
-        throw new Error("সার্ভারের সাথে সংযোগ করা যাচ্ছে না। আবার চেষ্টা করুন।");
+        throw new Error("সার্ভারের সাথে সংযোগ করতে সমস্যা হচ্ছে। আবার চেষ্টা করুন।");
     }
 };
 
@@ -104,7 +100,7 @@ export const extractTextFromImage = async (base64Image: string, mimeType: string
 
 export const generateStudyPlan = async (subject: string, topic: string): Promise<string> => {
     try {
-        const ai = getAI();
+        const ai = new GoogleGenAI({ apiKey: getApiKey() });
         const response = await retryWithBackoff(() => ai.models.generateContent({
             model: MODEL_NAME,
             contents: `Create a concise, 3-bullet point study strategy for: Subject: ${subject}, Topic: ${topic}. Answer in BENGALI language only.`
@@ -116,9 +112,9 @@ export const generateStudyPlan = async (subject: string, topic: string): Promise
 }
 
 export const analyzeChapter = async (images: ImageInput[]) => {
-  const ai = getAI();
+  const ai = new GoogleGenAI({ apiKey: getApiKey() });
   const imageParts = await prepareImages(images);
-  const prompt = `Act as an expert teacher. Analyze these textbook pages carefully. Provide: 1. Summary, 2. 10 Questions, 3. Key Topics. Answer in BENGALI language. Return a valid JSON format with keys: summary, questions, topics.`;
+  const prompt = `Act as an expert teacher. Analyze these textbook pages carefully. Provide: 1. Summary, 2. 10 Questions, 3. Key Topics. Answer in BENGALI language. Return a valid JSON format with keys: summary (string), questions (string array), topics (string array).`;
 
   const response = await retryWithBackoff(() => ai.models.generateContent({
     model: MODEL_NAME,
@@ -131,7 +127,7 @@ export const analyzeChapter = async (images: ImageInput[]) => {
 };
 
 export const translateText = async (text: string, targetLanguage: string): Promise<string> => {
-    const ai = getAI();
+    const ai = new GoogleGenAI({ apiKey: getApiKey() });
     const response = await retryWithBackoff(() => ai.models.generateContent({
         model: MODEL_NAME,
         contents: `Translate the following text to ${targetLanguage}. Text: ${text}`
@@ -140,9 +136,9 @@ export const translateText = async (text: string, targetLanguage: string): Promi
 };
 
 export const generateQuiz = async (images: ImageInput[]): Promise<QuizQuestion[]> => {
-    const ai = getAI();
+    const ai = new GoogleGenAI({ apiKey: getApiKey() });
     const imageParts = await prepareImages(images);
-    const prompt = `Generate 15 Multiple Choice Questions (MCQs) in BENGALI based on these textbook pages. Return JSON array of objects with keys: question, options (array of 4), correctAnswer (index 0-3), explanation.`;
+    const prompt = `Generate 15 Multiple Choice Questions (MCQs) in BENGALI based on these textbook pages. Return JSON array of objects with keys: question (string), options (array of 4 strings), correctAnswer (integer index 0-3), explanation (string).`;
 
     const response = await retryWithBackoff(() => ai.models.generateContent({
         model: MODEL_NAME,
@@ -155,11 +151,11 @@ export const generateQuiz = async (images: ImageInput[]): Promise<QuizQuestion[]
 };
 
 export const askTutor = async (images: ImageInput[], history: any[], question: string): Promise<string> => {
-    const ai = getAI();
+    const ai = new GoogleGenAI({ apiKey: getApiKey() });
     const imageParts = await prepareImages(images);
     const response = await retryWithBackoff(() => ai.models.generateContent({
         model: MODEL_NAME,
-        contents: { parts: [...imageParts, { text: `Answer clearly in BENGALI based on these pages. Question: ${question}` }] }
+        contents: { parts: [...imageParts, { text: `Answer clearly in BENGALI based on these textbook pages. Question: ${question}` }] }
     })) as GenerateContentResponse;
     return response.text || "দুঃখিত, উত্তর পাওয়া যায়নি।";
 };

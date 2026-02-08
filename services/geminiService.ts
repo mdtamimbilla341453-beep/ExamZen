@@ -2,24 +2,28 @@ import { createWorker } from 'tesseract.js';
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import { QuizQuestion, ImageInput } from '../types';
 
-// Use gemini-3-flash-preview as the core model
+/**
+ * নির্দেশিকা অনুযায়ী 'gemini-3-flash-preview' ব্যবহার করা হচ্ছে।
+ * এটি 1.5 Flash এর চেয়ে উন্নত এবং দ্রুত।
+ */
 const MODEL_NAME = 'gemini-3-flash-preview';
 
 /**
- * Robust AI instance generator. 
- * process.env.API_KEY is replaced during build time by Vite.
+ * এপিআই কী রিড করার মজবুত পদ্ধতি।
  */
 const getAI = () => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey || apiKey.trim() === '') {
-    console.error("Critical: API Key is missing. Ensure VITE_API_KEY is set in your environment.");
-    throw new Error("API Key is missing. Please check your configuration.");
+  // @ts-ignore
+  const apiKey = (process.env.API_KEY || import.meta.env.VITE_API_KEY || '').trim();
+  
+  if (!apiKey) {
+    console.error("Critical: API Key is missing.");
+    throw new Error("এপিআই কী পাওয়া যাচ্ছে না। অনুগ্রহ করে এনভায়রনমেন্ট সেটিংস চেক করুন।");
   }
   return new GoogleGenAI({ apiKey });
 };
 
-// --- Helper: Image Resizer ---
-const resizeImage = async (base64: string, mimeType: string, maxWidth = 800): Promise<string> => {
+// --- Helper: Image Resizer for efficiency ---
+const resizeImage = async (base64: string, mimeType: string, maxWidth = 1024): Promise<string> => {
     return new Promise((resolve) => {
         const img = new Image();
         img.src = `data:${mimeType};base64,${base64}`;
@@ -44,38 +48,35 @@ const resizeImage = async (base64: string, mimeType: string, maxWidth = 800): Pr
             canvas.height = height;
             const ctx = canvas.getContext('2d');
             ctx?.drawImage(img, 0, 0, width, height);
-            const dataUrl = canvas.toDataURL(mimeType, 0.6); 
+            const dataUrl = canvas.toDataURL(mimeType, 0.7); 
             resolve(dataUrl.split(',')[1]);
         };
         img.onerror = () => resolve(base64);
     });
 };
 
-// --- Helper: Retry Logic ---
 const retryWithBackoff = async <T>(
     operation: () => Promise<T>,
     retries: number = 2,
-    delay: number = 3000 
+    delay: number = 2000 
 ): Promise<T> => {
     try {
         return await operation();
     } catch (error: any) {
-        console.error("Gemini API Error:", error);
-        const errorMessage = error?.message?.toLowerCase() || "";
-        
-        if (retries > 0 && (errorMessage.includes('429') || errorMessage.includes('500') || errorMessage.includes('overloaded') || errorMessage.includes('quota'))) {
+        console.error("Gemini Error:", error);
+        const status = error?.status || 0;
+        const msg = error?.message?.toLowerCase() || "";
+
+        if (retries > 0 && (status === 429 || status === 500 || status === 503 || msg.includes('overloaded'))) {
             await new Promise((resolve) => setTimeout(resolve, delay));
             return retryWithBackoff(operation, retries - 1, delay * 2);
         }
         
-        if (errorMessage.includes('429') || errorMessage.includes('quota')) {
-            throw new Error("এপিআই লিমিট শেষ হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।");
-        }
-        if (errorMessage.includes('key') && (errorMessage.includes('invalid') || errorMessage.includes('403'))) {
-            throw new Error("আপনার এপিআই কী (API Key) সঠিক নয়।");
+        if (status === 403 || msg.includes('key') || msg.includes('invalid')) {
+            throw new Error("আপনার এপিআই কী (API Key) সঠিক নয় অথবা কাজ করছে না।");
         }
         
-        throw new Error("সার্ভারের সাথে সংযোগ বিচ্ছিন্ন হয়েছে। আবার চেষ্টা করুন।");
+        throw new Error("সার্ভারের সাথে সংযোগ করা যাচ্ছে না। আবার চেষ্টা করুন।");
     }
 };
 
@@ -94,7 +95,7 @@ export const extractTextFromImage = async (base64Image: string, mimeType: string
     const imageUrl = `data:${mimeType};base64,${base64Image}`;
     const ret = await worker.recognize(imageUrl);
     await worker.terminate();
-    return ret.data.text || "No text found.";
+    return ret.data.text || "টেক্সট পাওয়া যায়নি।";
   } catch (error) {
     console.error("OCR Error:", error);
     return "টেক্সট পড়া সম্ভব হয়নি।";
@@ -106,10 +107,10 @@ export const generateStudyPlan = async (subject: string, topic: string): Promise
         const ai = getAI();
         const response = await retryWithBackoff(() => ai.models.generateContent({
             model: MODEL_NAME,
-            contents: `Create a concise, 3-bullet point study strategy for: Subject: ${subject}, Topic: ${topic}. Language: BENGALI.`
+            contents: `Create a concise, 3-bullet point study strategy for: Subject: ${subject}, Topic: ${topic}. Answer in BENGALI language only.`
         })) as GenerateContentResponse;
         return response.text || "প্ল্যান তৈরি করা যায়নি।";
-    } catch (error) {
+    } catch (error: any) {
         return "১. মূল ধারণাগুলো পড়ুন।\n২. নোট তৈরি করুন।\n৩. নিয়মিত প্র্যাকটিস করুন।";
     }
 }
@@ -117,7 +118,7 @@ export const generateStudyPlan = async (subject: string, topic: string): Promise
 export const analyzeChapter = async (images: ImageInput[]) => {
   const ai = getAI();
   const imageParts = await prepareImages(images);
-  const prompt = `Act as an expert teacher. Analyze these textbook pages. Provide: 1. Summary, 2. 10 Questions, 3. Key Topics. Language: BENGALI. Return JSON format with keys: summary, questions, topics.`;
+  const prompt = `Act as an expert teacher. Analyze these textbook pages carefully. Provide: 1. Summary, 2. 10 Questions, 3. Key Topics. Answer in BENGALI language. Return a valid JSON format with keys: summary, questions, topics.`;
 
   const response = await retryWithBackoff(() => ai.models.generateContent({
     model: MODEL_NAME,
@@ -133,7 +134,7 @@ export const translateText = async (text: string, targetLanguage: string): Promi
     const ai = getAI();
     const response = await retryWithBackoff(() => ai.models.generateContent({
         model: MODEL_NAME,
-        contents: `Translate the following text to ${targetLanguage}. Keep the tone academic. Text: ${text}`
+        contents: `Translate the following text to ${targetLanguage}. Text: ${text}`
     })) as GenerateContentResponse;
     return response.text || "অনুবাদ করা যায়নি।";
 };
@@ -141,7 +142,7 @@ export const translateText = async (text: string, targetLanguage: string): Promi
 export const generateQuiz = async (images: ImageInput[]): Promise<QuizQuestion[]> => {
     const ai = getAI();
     const imageParts = await prepareImages(images);
-    const prompt = `Generate 15 Multiple Choice Questions (MCQs) in BENGALI from these textbook pages. Return a JSON array of objects. Each object must have: "question" (string), "options" (array of 4 strings), "correctAnswer" (integer 0-3), and "explanation" (string).`;
+    const prompt = `Generate 15 Multiple Choice Questions (MCQs) in BENGALI based on these textbook pages. Return JSON array of objects with keys: question, options (array of 4), correctAnswer (index 0-3), explanation.`;
 
     const response = await retryWithBackoff(() => ai.models.generateContent({
         model: MODEL_NAME,
@@ -158,7 +159,7 @@ export const askTutor = async (images: ImageInput[], history: any[], question: s
     const imageParts = await prepareImages(images);
     const response = await retryWithBackoff(() => ai.models.generateContent({
         model: MODEL_NAME,
-        contents: { parts: [...imageParts, { text: `Tutor session. Answer in BENGALI based on these images. Previous question: ${question}` }] }
+        contents: { parts: [...imageParts, { text: `Answer clearly in BENGALI based on these pages. Question: ${question}` }] }
     })) as GenerateContentResponse;
-    return response.text || "দুঃখিত, আমি উত্তরটি খুঁজে পাচ্ছি না।";
+    return response.text || "দুঃখিত, উত্তর পাওয়া যায়নি।";
 };
